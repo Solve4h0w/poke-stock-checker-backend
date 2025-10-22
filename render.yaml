@@ -1,0 +1,20 @@
+
+
+services:
+  - type: web
+    name: poke-stock-checker-backend
+    env: node
+    plan: free
+    region: oregon
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: DATA_URL
+        value: https://docs.google.com/spreadsheets/d/1DsfSV0-1U12l_cp7DbQKLoC_MNtKNJTmqYgb9KO8nhA/export?format=csv&id=1DsfSV0-1U12l_cp7DbQKLoC_MNtKNJTmqYgb9KO8nhA&gid=0
+      - key: CACHE_TTL_SECONDS
+        value: 60
+
+
+
