@@ -1,150 +1,102 @@
-import express from 'express';
-import cors from 'cors';
-import fetch from 'node-fetch';
-import { Expo } from 'expo-server-sdk';
+// backend/server.js
+const express = require("express");
+const cors = require("cors");
+require("dotenv").config();
 
-const PORT = process.env.PORT || 3000;
-const DATA_URL = process.env.DATA_URL;            // google sheet csv export link
-const CACHE_TTL_SECONDS = Number(process.env.CACHE_TTL_SECONDS || 60);
+const push = require("./push");
 
 const app = express();
+
+// ---- Middleware (order matters) ----
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: true }));
 
-// --- in-memory cache of sheet rows
-let lastFetchTime = 0;
-let rowsCache = [];
+// Optional health endpoint for the app's status line
+app.get("/health", (req, res) => {
+  res.json({ status: true, ts: Date.now() });
+});
 
-// shape: { store, name, status, url }
-function parseCsv(text) {
-  const lines = text.trim().split(/\r?\n/);
-  const headers = lines.shift().split(',').map(h => h.trim().toLowerCase());
-  const out = [];
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    const cols = [];
-    let cur = '';
-    let inQ = false;
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i];
-      if (ch === '"' && line[i + 1] === '"') { cur += '"'; i++; continue; }
-      if (ch === '"') { inQ = !inQ; continue; }
-      if (ch === ',' && !inQ) { cols.push(cur); cur = ''; continue; }
-      cur += ch;
-    }
-    cols.push(cur);
+// -----------------------------
+// YOUR EXISTING PRODUCT ROUTES
+// -----------------------------
+// Make sure you expose products at /api/products (or change pollUrl below).
+// Example only (remove if you already have a real one):
+// app.get("/api/products", (req, res) => {
+//   res.json([
+//     { name: "151 etb", store: "Walmart", status: "In stock", url: "https://walmart.com" },
+//     { name: "Obsidian Flames Booster Box", store: "Target", status: "Out of stock", url: "https://target.com" },
+//     { name: "Scarlet and Violet Booster Pack", store: "BestBuy", status: "In stock", url: "https://bestbuy.com" },
+//   ]);
+// });
 
-    const obj = {};
-    headers.forEach((h, i) => obj[h] = (cols[i] ?? '').trim());
-
-    out.push({
-      store:  obj.store || obj.shop || obj.retailer || 'Unknown',
-      name:   obj.item  || obj.product || 'Unknown item',
-      status: obj.stock || obj.status || 'Unknown',
-      url:    obj.url || obj.link || ''
-    });
-  }
-  return out;
-}
-
-async function fetchRows(force = false) {
-  const now = Date.now();
-  if (!force && now - lastFetchTime < CACHE_TTL_SECONDS * 1000 && rowsCache.length) {
-    return rowsCache;
-  }
-  const res = await fetch(DATA_URL);
-  if (!res.ok) throw new Error(`CSV fetch failed ${res.status}`);
-  const text = await res.text();
-  rowsCache = parseCsv(text);
-  lastFetchTime = now;
-  return rowsCache;
-}
-
-app.get('/health', (req, res) => res.json({ ok: true }));
-
-app.get('/stock', async (req, res) => {
+// -----------------------------
+// PUSH: subscribe / unsubscribe / test
+// -----------------------------
+app.post("/subscribe", (req, res) => {
   try {
-    const rows = await fetchRows(false);
-    res.json(rows);
+    console.log("[/subscribe] headers:", req.headers);
+    console.log("[/subscribe] body:", req.body);
+    const { token, item } = req.body || {};
+    if (!token || !item) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "token and item required", received: req.body });
+    }
+    return res.json(push.subscribe(token, item));
   } catch (e) {
     console.error(e);
-    res.status(500).json({ error: 'Fetch failed' });
+    return res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 });
 
-// ---------- PUSH ALERTS ----------
-const expo = new Expo();
-// subscriptions: key "store|name" -> Set of expoPushTokens
-const subscriptions = new Map();
-// last known status to detect transitions
-const lastStatus = new Map();
-
-const keyFor = (row) => `${row.store}|${row.name}`;
-const toBool = (v) => v === true || v === 'true';
-
-app.post('/register-device', (req, res) => {
-  const { token } = req.body || {};
-  if (!Expo.isExpoPushToken(token)) {
-    return res.status(400).json({ ok: false, error: 'Invalid Expo token' });
-  }
-  // nothing else to do yet; we register per-subscription
-  return res.json({ ok: true });
-});
-
-app.post('/subscribe', (req, res) => {
-  const { token, key, enabled } = req.body || {};
-  if (!Expo.isExpoPushToken(token)) {
-    return res.status(400).json({ ok: false, error: 'Invalid token' });
-  }
-  if (!key) return res.status(400).json({ ok: false, error: 'Missing key' });
-
-  const set = subscriptions.get(key) || new Set();
-  if (toBool(enabled)) set.add(token); else set.delete(token);
-  if (set.size) subscriptions.set(key, set); else subscriptions.delete(key);
-  return res.json({ ok: true, subscribers: set.size });
-});
-
-async function pollAndNotify() {
+app.post("/unsubscribe", (req, res) => {
   try {
-    const rows = await fetchRows(false);
-    // detect transitions to "In stock"
-    for (const row of rows) {
-      const key = keyFor(row);
-      const status = String(row.status || '').toLowerCase();
-      const prev = lastStatus.get(key);
-      lastStatus.set(key, status);
-
-      const becameInStock = prev && prev !== 'in stock' && status === 'in stock';
-      if (!becameInStock) continue;
-
-      const targets = subscriptions.get(key);
-      if (!targets || !targets.size) continue;
-
-      const messages = [...targets].map(token => ({
-        to: token,
-        sound: 'default',
-        title: `${row.name}`,
-        body: `${row.store}: In stock now`,
-        data: { key, store: row.store, name: row.name, url: row.url || '' },
-      }));
-
-      const chunks = expo.chunkPushNotifications(messages);
-      for (const chunk of chunks) {
-        try {
-          await expo.sendPushNotificationsAsync(chunk);
-        } catch (err) {
-          console.error('Expo push error', err);
-        }
-      }
+    console.log("[/unsubscribe] body:", req.body);
+    const { token, item } = req.body || {};
+    if (!token || !item) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "token and item required", received: req.body });
     }
+    return res.json(push.unsubscribe(token, item));
   } catch (e) {
-    console.warn('Poll error', e.message);
+    console.error(e);
+    return res.status(500).json({ ok: false, error: String(e.message || e) });
   }
-}
-
-// poll every 60s
-setInterval(pollAndNotify, 60_000);
-
-app.listen(PORT, () => {
-  console.log(`Backend running on 0.0.0.0:${PORT}`);
 });
+
+app.post("/notify-test", async (req, res) => {
+  try {
+    console.log("[/notify-test] body:", req.body);
+    const { token, title, body } = req.body || {};
+    if (!token) {
+      return res.status(400).json({ ok: false, error: "token required" });
+    }
+    const out = await push.notifyTest(token, title, body);
+    return res.json(out);
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
+// -----------------------------
+// START SERVER + START WATCHER
+// -----------------------------
+const PORT = process.env.PORT || 3001;
+const server = app.listen(PORT, () => {
+  console.log("Server listening on", PORT);
+
+  const base =
+    process.env.PUBLIC_URL ||
+    process.env.RENDER_EXTERNAL_URL ||
+    `http://localhost:${PORT}`;
+
+  // Change this path if your products route differs
+  const pollUrl = `${base}/api/products`;
+
+  push.startWatcher({ apiUrl: pollUrl, periodMs: 60_000 });
+});
+
+module.exports = server;
