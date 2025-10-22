@@ -1,35 +1,32 @@
-// backend/src/push.js
-import fs from "fs";
-import path from "path";
-import fetch from "node-fetch";
+// src/push.js (CommonJS; uses built-in global fetch in Node 18+)
+const fs = require("fs");
+const path = require("path");
 
-const SUBS_FILE = path.join(process.cwd(), "subscriptions.json");
+// Persist subscriptions locally (JSON beside this file)
+const SUBS_FILE = path.join(__dirname, "subscriptions.json");
 
 function loadSubs() {
-  try {
-    return JSON.parse(fs.readFileSync(SUBS_FILE, "utf8"));
-  } catch {
-    return {};
-  }
+  try { return JSON.parse(fs.readFileSync(SUBS_FILE, "utf8")); }
+  catch { return {}; }
 }
-
 function saveSubs(obj) {
   fs.writeFileSync(SUBS_FILE, JSON.stringify(obj, null, 2));
 }
 
-let subs = loadSubs();
+let subs = loadSubs();   // { "<itemName>": ["ExponentPushToken[...]"] }
+let prevMap = new Map(); // remembers previous in-stock state (name -> bool)
 
 function toBoolInStock(status) {
   if (typeof status === "boolean") return status;
-  const s = String(status).toLowerCase();
+  const s = String(status ?? "").toLowerCase();
   return s.includes("in stock") || s === "true" || s === "yes" || s === "available";
 }
 
-async function sendExpoPush(to, title, body, data) {
+async function sendExpoPush({ to, title, body, data }) {
   const res = await fetch("https://exp.host/--/api/v2/push/send", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ to, title, body, data }),
+    body: JSON.stringify({ to, title, body, data })
   });
   const json = await res.json();
   if (!res.ok) console.error("Expo push error:", res.status, json);
@@ -45,46 +42,58 @@ function subscribe(token, item) {
 
 function unsubscribe(token, item) {
   if (!token || !item) throw new Error("token and item required");
-  subs[item] = (subs[item] || []).filter((t) => t !== token);
+  subs[item] = (subs[item] || []).filter(t => t !== token);
+  if (subs[item].length === 0) delete subs[item];
   saveSubs(subs);
-  return { ok: true, item, subscribers: subs[item].length };
+  return { ok: true, item, subscribers: subs[item]?.length || 0 };
 }
 
-// 🧠 WATCHER: polls your /api/products endpoint every minute
-async function startWatcher({ apiUrl, periodMs = 60000 }) {
-  console.log(`[push] Watching products at: ${apiUrl}`);
-  let prevMap = new Map();
+async function pollOnce(apiUrl) {
+  const res = await fetch(apiUrl);
+  const text = await res.text();
 
-  setInterval(async () => {
-    try {
-      const res = await fetch(apiUrl);
-      const json = await res.json();
+  // Skip HTML error pages
+  if (/<!doctype html>|<html/i.test(text)) {
+    throw new Error("Endpoint returned HTML (not JSON) — wrong path");
+  }
 
-      if (!Array.isArray(json)) {
-        console.error("[push] Expected JSON array from API but got:", json);
-        return;
+  let j;
+  try { j = JSON.parse(text); } catch { throw new Error("Endpoint did not return valid JSON"); }
+
+  const list = Array.isArray(j) ? j : (j.products || j.items || j.data || j.results || []);
+  if (!Array.isArray(list)) throw new Error("JSON did not contain a products array");
+
+  const nowMap = new Map();
+  for (const p of list) {
+    const name = p.name || p.title || p.product || "Unnamed";
+    const status = p.status ?? p.availability ?? (p.inStock ? "In stock" : "Out of stock");
+    nowMap.set(name, toBoolInStock(status));
+  }
+
+  for (const [name, nowIn] of nowMap.entries()) {
+    const wasIn = prevMap.get(name);
+    if (wasIn === false && nowIn === true && subs[name]?.length) {
+      console.log(`[push] ${name} flipped IN STOCK — notifying ${subs[name].length}`);
+      for (const to of subs[name]) {
+        await sendExpoPush({
+          to,
+          title: "In stock!",
+          body: `${name} is available now`,
+          data: { type: "restock", item: name }
+        });
       }
-
-      for (const item of json) {
-        const name = item.name || item.title;
-        const inStock = toBoolInStock(item.inStock || item.status);
-
-        if (!prevMap.has(name) && inStock) {
-          const tokens = subs[name] || [];
-          for (const t of tokens) {
-            await sendExpoPush(t, `${name} in stock!`, "Available now!", { item: name });
-          }
-        }
-        prevMap.set(name, inStock);
-      }
-    } catch (err) {
-      console.error("[push] Poll error:", err.message);
     }
-  }, periodMs);
+  }
+  prevMap = nowMap;
 }
 
-// Start watcher explicitly for your deployed endpoint
-const apiUrl = "https://poke-stock-checker-backend.onrender.com/api/products";
-startWatcher({ apiUrl, periodMs: 60000 });
+function startWatcher({ apiUrl, periodMs = 60_000 }) {
+  console.log("[push] polling", apiUrl, "every", periodMs / 1000, "s");
+  pollOnce(apiUrl).catch(e => console.error("poll error:", e.message));
+  return setInterval(() => pollOnce(apiUrl).catch(e => console.error("poll error:", e.message)), periodMs);
+}
 
-export { subscribe, unsubscribe };
+module.exports = { subscribe, unsubscribe, notifyTest: async (token, title = "Test Stock Alert", body = "This is a test.") => {
+  await sendExpoPush({ to: token, title, body, data: { type: "test" } });
+  return { ok: true };
+}, startWatcher };
