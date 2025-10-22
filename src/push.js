@@ -1,7 +1,8 @@
-// backend/push.js
+// src/push.js (CommonJS)
 const fs = require("fs");
 const path = require("path");
 
+// Persist subscriptions locally (JSON beside this file)
 const SUBS_FILE = path.join(__dirname, "subscriptions.json");
 
 function loadSubs() {
@@ -12,8 +13,8 @@ function saveSubs(obj) {
   fs.writeFileSync(SUBS_FILE, JSON.stringify(obj, null, 2));
 }
 
-let subs = loadSubs();           // { "<itemName>": ["ExponentPushToken[...]"] }
-let prevMap = new Map();         // remembers previous in-stock state (name -> bool)
+let subs = loadSubs();   // { "<itemName>": ["ExponentPushToken[...]"] }
+let prevMap = new Map(); // remembers previous in-stock state (name -> bool)
 
 function toBoolInStock(status) {
   if (typeof status === "boolean") return status;
@@ -82,7 +83,7 @@ async function pollOnce(apiUrl) {
 
 function startWatcher({ apiUrl, periodMs = 60_000 }) {
   console.log("[push] polling", apiUrl, "every", periodMs / 1000, "s");
-  // run immediately, then on interval
+  // first run now, then on interval
   pollOnce(apiUrl).catch(e => console.error("poll error:", e));
   return setInterval(() => pollOnce(apiUrl).catch(e => console.error("poll error:", e)), periodMs);
 }
