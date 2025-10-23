@@ -1,78 +1,81 @@
-// backend/src/server.js  (CommonJS)
-const express = require("express");
-const cors = require("cors");
-require("dotenv").config();
+// backend/src/server.js  (ESM)
+import express from "express";
+import cors from "cors";
+import dotenv from "dotenv";
+import targetRoutes from "./targetRoutes.js";
 
-const push = require("./push");
+dotenv.config();
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "1mb" }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
 
-// ---------- TEMP PRODUCTS STUB (guarantees JSON at /api/products) ----------
-app.get("/api/products", (_req, res) => {
-  // You can replace this array later with real data.
-  res.json([
-    { name: "151 etb", store: "Walmart", status: "In stock", url: "https://walmart.com" },
-    { name: "Obsidian Flames Booster Box", store: "Target", status: "Out of stock", url: "https://target.com" },
-    { name: "Scarlet and Violet Booster Pack", store: "BestBuy", status: "In stock", url: "https://bestbuy.com" }
-  ]);
-});
-// --------------------------------------------------------------------------
-
-// Health
+// ---------- Health ----------
 app.get("/health", (_req, res) => {
   res.json({ status: true, ts: Date.now() });
 });
 
-// Subscribe / Unsubscribe / Test push
-app.post("/subscribe", (req, res) => {
+// ---------- Products (your existing polling endpoint) ----------
+const PRODUCTS_PATH = process.env.PRODUCTS_PATH || "/api/products";
+const DATA_URL = process.env.DATA_URL || "";
+const CACHE_TTL_SECONDS = Number(process.env.CACHE_TTL_SECONDS || 60);
+
+let _cache = { ts: 0, data: [] };
+
+async function fetchText(url) {
+  const r = await fetch(url, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+      Accept: "text/plain, */*",
+    },
+  });
+  if (!r.ok) throw new Error(`DATA_URL fetch failed: ${r.status}`);
+  return r.text();
+}
+
+function parseCSV(text) {
+  // Tiny CSV parser good enough for simple Google Sheets CSV
+  const lines = text.trim().split(/\r?\n/);
+  const header = lines.shift()?.split(",") ?? [];
+  return lines.map((line) => {
+    const cols = line.split(",");
+    const obj = {};
+    header.forEach((h, i) => (obj[h.trim()] = (cols[i] || "").trim()));
+    return obj;
+  });
+}
+
+async function loadProducts() {
+  if (!DATA_URL) return [];
+  const raw = await fetchText(DATA_URL);
+  // If your sheet is CSV, this will work. If you ever switch to JSON, adapt here.
+  return parseCSV(raw);
+}
+
+app.get(PRODUCTS_PATH, async (_req, res) => {
   try {
-    const { token, item } = req.body || {};
-    if (!token || !item) return res.status(400).json({ ok: false, error: "token and item required" });
-    return res.json(push.subscribe(token, item));
-  } catch (e) { console.error(e); res.status(500).json({ ok: false, error: String(e.message || e) }); }
+    const now = Date.now();
+    if (now - _cache.ts > CACHE_TTL_SECONDS * 1000) {
+      const data = await loadProducts();
+      _cache = { ts: now, data };
+    }
+    res.json(_cache.data);
+  } catch (e) {
+    res.status(500).json({ error: String(e?.message || e) });
+  }
 });
 
-app.post("/unsubscribe", (req, res) => {
-  try {
-    const { token, item } = req.body || {};
-    if (!token || !item) return res.status(400).json({ ok: false, error: "token and item required" });
-    return res.json(push.unsubscribe(token, item));
-  } catch (e) { console.error(e); res.status(500).json({ ok: false, error: String(e.message || e) }); }
+// ---------- Target endpoints ----------
+app.use("/api/target", targetRoutes);
+
+// ---------- Root ----------
+app.get("/", (_req, res) => {
+  res.type("text/plain").send("ok");
 });
 
-app.post("/notify-test", async (req, res) => {
-  try {
-    const { token, title, body } = req.body || {};
-    if (!token) return res.status(400).json({ ok: false, error: "token required" });
-    const out = await push.notifyTest(token, title, body);
-    return res.json(out);
-  } catch (e) { console.error(e); res.status(500).json({ ok: false, error: String(e.message || e) }); }
-});
-
-// Return JSON for unknown routes (avoid HTML 404)
-app.use((req, res) => {
-  res.status(404).json({ ok: false, error: "Not Found", path: req.path });
-});
-
-// ---------- Start server & watcher ----------
-const PORT = process.env.PORT || 3001;
+// ---------- Listen ----------
+const PORT = Number(process.env.PORT || 3000);
 app.listen(PORT, () => {
-  console.log("Server listening on", PORT);
-
-  const base =
-    process.env.PUBLIC_URL ||
-    process.env.RENDER_EXTERNAL_URL ||
-    `http://localhost:${PORT}`;
-
-  // Watcher path (defaults to our stub)
-  const pathFromEnv = (process.env.PRODUCTS_PATH || "/api/products").trim();
-  const apiUrl = `${base}${pathFromEnv.startsWith("/") ? pathFromEnv : `/${pathFromEnv}`}`;
-
-  console.log(`[push] using products endpoint: ${apiUrl}`);
-  push.startWatcher({ apiUrl, periodMs: 60_000 });
+  console.log(`Server listening on ${PORT}`);
 });
-
-module.exports = app;
