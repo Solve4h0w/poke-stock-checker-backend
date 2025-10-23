@@ -3,32 +3,27 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 
+import targetRoutes from "./targetRoutes.js";
+
 dotenv.config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- Health checks ---
-app.get("/", (req, res) => {
-  res.send("ok");
+// --- basic health checks ---
+app.get("/health", (_req, res) => {
+  res.json({ ok: true, ts: Date.now() });
 });
-
-app.get("/health", (req, res) => {
+app.get("/api/health", (_req, res) => {
   res.json({ ok: true, ts: Date.now() });
 });
 
-app.get("/api/health", (req, res) => {
-  res.json({ ok: true, ts: Date.now() });
-});
+// --- mount Target routes ---
+app.use("/api/target", targetRoutes);
+console.log("✅ Target routes mounted at /api/target");
 
-// OPTIONAL: if you already have other routers, keep them here, e.g.
-// import pushRoutes from "./pushRoutes.js";
-// import targetRoutes from "./targetRoutes.js";
-// app.use("/api", pushRoutes);
-// app.use("/api/target", targetRoutes);
-
-// 404 fall-through (so you get JSON instead of "Cannot GET /...")
+// --- 404 fallback (keep last) ---
 app.use((req, res) => {
   res.status(404).json({ ok: false, error: "Not Found", path: req.path });
 });

@@ -1,36 +1,34 @@
-// backend/src/targetRoutes.js  (ESM)
+// backend/src/targetRoutes.js
 import { Router } from "express";
 import { searchTarget } from "./targetClient.js";
 
 const router = Router();
 
+/**
+ * Quick “ping” route to confirm the router is mounted.
+ * GET /api/target/ping -> { ok: true }
+ */
 router.get("/ping", (_req, res) => {
-  res.json({ ok: true, where: "target router" });
+  res.json({ ok: true, ts: Date.now() });
 });
 
+/**
+ * GET /api/target/search?q=151
+ * Requires env: TARGET_WEB_KEY (and optional TARGET_STORE_ID)
+ */
 router.get("/search", async (req, res) => {
-  const q = String(req.query.q || "pokemon");
-  const key = process.env.TARGET_WEB_KEY || "";
-  const store = String(req.query.store || process.env.TARGET_STORE_ID || "");
-
-  if (!key) {
-    return res.status(500).json({
-      ok: false,
-      error: "Missing TARGET_WEB_KEY env var",
-    });
-  }
-
   try {
-    const result = await searchTarget({ q, key, store });
-    res.json({
-      ok: true,
-      q,
-      store: store || undefined,
-      total: result.items.length,
-      items: result.items,
-    });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    const q = String(req.query.q || "").trim();
+    if (!q) return res.status(400).json({ ok: false, error: "Missing q" });
+
+    const key = process.env.TARGET_WEB_KEY;
+    const storeId = process.env.TARGET_STORE_ID || "";
+    if (!key) return res.status(500).json({ ok: false, error: "Missing TARGET_WEB_KEY env" });
+
+    const result = await searchTarget({ q, key, storeId });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || "Search failed" });
   }
 });
 

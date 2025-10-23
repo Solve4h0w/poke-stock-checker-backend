@@ -1,73 +1,55 @@
-// backend/src/targetClient.js  (ESM)
+// backend/src/targetClient.js
+import fetch from "node-fetch";
 
-// Very small RedSky client that uses the ephemeral Target "web key" you grabbed
-// from Network tab (DevTools). It returns a normalized array of products.
+/**
+ * Minimal Target “client” that calls the same internal JSON APIs
+ * the Target product page calls (via RedSky) using the web “key”
+ * you captured in DevTools.
+ */
 
-function buildSearchUrl({ q, key, store }) {
-  const params = new URLSearchParams({
-    key,                 // Target web key (ephemeral)
-    keyword: q,          // search term, e.g., "151", "prismatic"
-    channel: "WEB",
-    count: "24",
-    offset: "0"
-  });
+const TARGET_BASE = "https://redsky.target.com/redsky_aggregations";
 
-  // If you add a store id, RedSky tends to bias results to that store
-  if (store) params.set("store_id", store);
+/**
+ * Search Target catalog by keyword.
+ * @param {string} q  keyword, e.g., "pokemon", "151", "prismatic"
+ * @param {string} key  Target web key from DevTools
+ * @param {string|number} storeId Target store id (optional but helps availability)
+ */
+export async function searchTarget({ q, key, storeId }) {
+  if (!key) throw new Error("Missing Target web key");
 
-  return `https://redsky.target.com/redsky_aggregations/v1/web/plp_search_v1?${params}`;
-}
+  // This aggregator returns a compact product list for a query.
+  // We keep it simple and just extract some basic fields.
+  const url = new URL(`${TARGET_BASE}/v1/web/plp_search_v1`);
+  url.searchParams.set("key", key);
+  url.searchParams.set("keyword", q);
+  url.searchParams.set("page", "1");
+  url.searchParams.set("size", "24"); // first page
+  if (storeId) url.searchParams.set("store_id", String(storeId));
 
-export async function searchTarget({ q, key, store }) {
-  const url = buildSearchUrl({ q, key, store });
-
-  const r = await fetch(url, {
+  const res = await fetch(url.toString(), {
     headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-      Accept: "application/json"
-    }
+      "accept": "application/json",
+      "x-requested-with": "XMLHttpRequest",
+    },
   });
 
-  if (!r.ok) {
-    throw new Error(`redsky ${r.status}`);
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Target search failed: ${res.status} ${text}`);
   }
 
-  const json = await r.json();
+  const json = await res.json();
 
-  // The RedSky structure changes. Grab the most likely list of products:
-  const products =
-    json?.data?.search?.products ||
-    json?.data?.children ||
-    json?.data?.results ||
-    [];
+  // Extract a small, stable subset for your app
+  const items = (json?.data?.search?.products || []).map((p) => ({
+    tcin: p?.tcin,
+    title: p?.item?.product_description?.title || p?.title,
+    brand: p?.item?.brand_name,
+    price: p?.price?.current_retail || p?.price?.formatted_current_price,
+    image: p?.item?.enrichment?.images?.primary_image_url,
+    url: p?.item?.enrichment?.buy_url || (p?.tcin ? `https://www.target.com/p/${p.tcin}` : null),
+  }));
 
-  const items = products.map((p) => {
-    const tcin = p.tcin || p.item?.tcin;
-    const title =
-      p.title ||
-      p.item?.product_description?.title ||
-      p.item?.product_description?.downstream_description ||
-      p.item?.enrichment?.buy_url ||
-      "Unknown";
-
-    // Try to pull any price-like thing that might exist as an example:
-    const price =
-      p.price?.current_retail ||
-      p.price?.formatted_current_price ||
-      p.price?.current_price ||
-      null;
-
-    const url = tcin ? `https://www.target.com/p/${tcin}` : undefined;
-
-    // A very rough stock hint if present:
-    const in_stock =
-      p.fulfillment?.is_out_of_stock === false ||
-      p.sale_channel_availability?.status === "IN_STOCK" ||
-      undefined;
-
-    return { tcin, title, price, url, in_stock, raw: p };
-  });
-
-  return { items, raw: json };
+  return { ok: true, count: items.length, items };
 }
