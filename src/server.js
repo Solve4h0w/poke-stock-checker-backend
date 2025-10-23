@@ -10,15 +10,16 @@ app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// ---------- TEMP PRODUCTS STUB (OK to deploy; replace later with real data) ----------
-app.get("/api/products", (req, res) => {
+// ---------- TEMP PRODUCTS STUB (guarantees JSON at /api/products) ----------
+app.get("/api/products", (_req, res) => {
+  // You can replace this array later with real data.
   res.json([
     { name: "151 etb", store: "Walmart", status: "In stock", url: "https://walmart.com" },
     { name: "Obsidian Flames Booster Box", store: "Target", status: "Out of stock", url: "https://target.com" },
     { name: "Scarlet and Violet Booster Pack", store: "BestBuy", status: "In stock", url: "https://bestbuy.com" }
   ]);
 });
-// -------------------------------------------------------------------------------------
+// --------------------------------------------------------------------------
 
 // Health
 app.get("/health", (_req, res) => {
@@ -31,9 +32,7 @@ app.post("/subscribe", (req, res) => {
     const { token, item } = req.body || {};
     if (!token || !item) return res.status(400).json({ ok: false, error: "token and item required" });
     return res.json(push.subscribe(token, item));
-  } catch (e) {
-    console.error(e); return res.status(500).json({ ok: false, error: String(e.message || e) });
-  }
+  } catch (e) { console.error(e); res.status(500).json({ ok: false, error: String(e.message || e) }); }
 });
 
 app.post("/unsubscribe", (req, res) => {
@@ -41,9 +40,7 @@ app.post("/unsubscribe", (req, res) => {
     const { token, item } = req.body || {};
     if (!token || !item) return res.status(400).json({ ok: false, error: "token and item required" });
     return res.json(push.unsubscribe(token, item));
-  } catch (e) {
-    console.error(e); return res.status(500).json({ ok: false, error: String(e.message || e) });
-  }
+  } catch (e) { console.error(e); res.status(500).json({ ok: false, error: String(e.message || e) }); }
 });
 
 app.post("/notify-test", async (req, res) => {
@@ -52,9 +49,12 @@ app.post("/notify-test", async (req, res) => {
     if (!token) return res.status(400).json({ ok: false, error: "token required" });
     const out = await push.notifyTest(token, title, body);
     return res.json(out);
-  } catch (e) {
-    console.error(e); return res.status(500).json({ ok: false, error: String(e.message || e) });
-  }
+  } catch (e) { console.error(e); res.status(500).json({ ok: false, error: String(e.message || e) }); }
+});
+
+// Return JSON for unknown routes (avoid HTML 404)
+app.use((req, res) => {
+  res.status(404).json({ ok: false, error: "Not Found", path: req.path });
 });
 
 // ---------- Start server & watcher ----------
@@ -67,7 +67,7 @@ app.listen(PORT, () => {
     process.env.RENDER_EXTERNAL_URL ||
     `http://localhost:${PORT}`;
 
-  // Point the watcher to PRODUCTS_PATH (default to the stub)
+  // Watcher path (defaults to our stub)
   const pathFromEnv = (process.env.PRODUCTS_PATH || "/api/products").trim();
   const apiUrl = `${base}${pathFromEnv.startsWith("/") ? pathFromEnv : `/${pathFromEnv}`}`;
 
@@ -76,4 +76,3 @@ app.listen(PORT, () => {
 });
 
 module.exports = app;
-

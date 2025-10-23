@@ -1,20 +1,17 @@
-// src/push.js (CommonJS; uses built-in global fetch in Node 18+)
+// backend/src/push.js (CommonJS; uses built-in global fetch)
 const fs = require("fs");
 const path = require("path");
 
-// Persist subscriptions locally (JSON beside this file)
 const SUBS_FILE = path.join(__dirname, "subscriptions.json");
 
 function loadSubs() {
   try { return JSON.parse(fs.readFileSync(SUBS_FILE, "utf8")); }
   catch { return {}; }
 }
-function saveSubs(obj) {
-  fs.writeFileSync(SUBS_FILE, JSON.stringify(obj, null, 2));
-}
+function saveSubs(obj) { fs.writeFileSync(SUBS_FILE, JSON.stringify(obj, null, 2)); }
 
-let subs = loadSubs();   // { "<itemName>": ["ExponentPushToken[...]"] }
-let prevMap = new Map(); // remembers previous in-stock state (name -> bool)
+let subs = loadSubs();          // { "<item>": ["ExponentPushToken[...]"] }
+let prevMap = new Map();        // remembers last in-stock state (name -> bool)
 
 function toBoolInStock(status) {
   if (typeof status === "boolean") return status;
@@ -43,7 +40,7 @@ function subscribe(token, item) {
 function unsubscribe(token, item) {
   if (!token || !item) throw new Error("token and item required");
   subs[item] = (subs[item] || []).filter(t => t !== token);
-  if (subs[item].length === 0) delete subs[item];
+  if (!subs[item]?.length) delete subs[item];
   saveSubs(subs);
   return { ok: true, item, subscribers: subs[item]?.length || 0 };
 }
@@ -52,13 +49,14 @@ async function pollOnce(apiUrl) {
   const res = await fetch(apiUrl);
   const text = await res.text();
 
-  // Skip HTML error pages
+  // If route not found, Express default is HTML. Bail out with a clear message.
   if (/<!doctype html>|<html/i.test(text)) {
     throw new Error("Endpoint returned HTML (not JSON) — wrong path");
   }
 
   let j;
-  try { j = JSON.parse(text); } catch { throw new Error("Endpoint did not return valid JSON"); }
+  try { j = JSON.parse(text); }
+  catch { throw new Error("Endpoint did not return valid JSON"); }
 
   const list = Array.isArray(j) ? j : (j.products || j.items || j.data || j.results || []);
   if (!Array.isArray(list)) throw new Error("JSON did not contain a products array");
@@ -93,7 +91,9 @@ function startWatcher({ apiUrl, periodMs = 60_000 }) {
   return setInterval(() => pollOnce(apiUrl).catch(e => console.error("poll error:", e.message)), periodMs);
 }
 
-module.exports = { subscribe, unsubscribe, notifyTest: async (token, title = "Test Stock Alert", body = "This is a test.") => {
+async function notifyTest(token, title = "Test Stock Alert", body = "This is a test.") {
   await sendExpoPush({ to: token, title, body, data: { type: "test" } });
   return { ok: true };
-}, startWatcher };
+}
+
+module.exports = { subscribe, unsubscribe, startWatcher, notifyTest };
