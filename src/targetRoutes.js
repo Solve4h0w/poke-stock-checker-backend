@@ -1,56 +1,63 @@
 // backend/src/targetRoutes.js
-import { Router } from 'express';
-import { searchTarget } from './targetClient.js';
+//
+// Express router exposing Target endpoints.
+// We now provide /api/target/item/:tcin  -> single-product availability.
+
+import { Router } from "express";
+import { fetchItemStatus } from "./targetClient.js";
 
 const router = Router();
 
-// pull all the Target config from env (and fallbacks to avoid crashes if missing)
-const STORE_ID    = process.env.TARGET_STORE_ID    || '2314';
-const WEB_KEY     = process.env.TARGET_WEB_KEY     || '';
-const VISITOR_ID  = process.env.TARGET_VISITOR_ID  || '';
+/**
+ * Simple ping for debugging (OPTIONAL)
+ * GET /api/target/ping
+ */
+router.get("/ping", (req, res) => {
+  res.json({ ok: true, msg: "targetRoutes alive" });
+});
 
-router.get('/search', async (req, res) => {
+/**
+ * GET /api/target/item/:tcin
+ *
+ * Example:
+ *   /api/target/item/93954446
+ *
+ * Response shape:
+ *   {
+ *     ok: true,
+ *     tcin: "93954446",
+ *     title: "...",
+ *     price: "...",
+ *     pickup: { available: true/false, qty: number|null },
+ *     ship: { available: true/false, qty: number|null },
+ *     raw: {...}   // full Target JSON
+ *   }
+ *
+ * or { ok: false, status: <code>, error: "...", snippet: "..." }
+ */
+router.get("/item/:tcin", async (req, res) => {
+  const { tcin } = req.params || {};
+  if (!tcin) {
+    return res.status(400).json({ ok: false, error: "Missing tcin" });
+  }
+
   try {
-    if (!WEB_KEY) {
-      return res
-        .status(500)
-        .json({ ok: false, error: 'TARGET_WEB_KEY missing' });
-    }
-
-    if (!VISITOR_ID) {
-      return res
-        .status(500)
-        .json({ ok: false, error: 'TARGET_VISITOR_ID missing' });
-    }
-
-    const q = (req.query.q || '').toString().trim();
-    if (!q) {
-      return res.status(400).json({ ok: false, error: 'Missing q' });
-    }
-
-    // Pretend the request originated from target.com
-    const originHost = 'www.target.com';
-
-    // Ask Target
-    const result = await searchTarget({
-      q,
-      storeId: STORE_ID,
-      webKey: WEB_KEY,
-      visitorId: VISITOR_ID,
-      originHost,
-    });
+    const result = await fetchItemStatus(tcin);
 
     if (!result.ok) {
-      // surface debug status/snippet if we couldn't get 200 from Target
-      return res.status(502).json(result);
+      // bubble up status if we have it
+      return res
+        .status(result.status || 502)
+        .json(result);
     }
 
     return res.json(result);
   } catch (err) {
-    console.error('[target/search] error:', err);
-    return res
-      .status(500)
-      .json({ ok: false, error: err?.message || 'Unknown error' });
+    console.error("[target/item] error:", err);
+    return res.status(500).json({
+      ok: false,
+      error: err?.message || "Unknown error",
+    });
   }
 });
 

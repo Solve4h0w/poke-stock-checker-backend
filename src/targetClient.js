@@ -1,150 +1,131 @@
 // backend/src/targetClient.js
-// Talks to Target's RedSky API, pretending to be your real browser session.
-// Used by /api/target/search in targetRoutes.js
-
-import { request } from "undici";
-
-// =============================
-// 1. Captured "fingerprint"
-// =============================
 //
-// These values all came from your real devtools session. They make
-// Target think this request is coming from a legit Target tab in Chrome
-// at your local store.
-
-const FIXED_WEB_KEY = "9f36aeafbe60771e321a7cc95a78140772ab3e96"; // from ?key=...
-const FIXED_VISITOR_ID = "01989633EB690201997B4F22E8604F90";       // from &visitor_id=...
-const DEFAULT_STORE_ID = "2314";                                    // from &store_id=...
-const ORIGIN_HOST = "www.target.com";
-
-// Your actual UA and referer from DevTools (you provided these 👇)
-const FIXED_USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
-
-const FIXED_REFERER =
-  "https://www.target.com/p/pok-233-mon-trading-card-game-scarlet-38-violet-prismatic-evolutions-booster-bundle/-/A-93954446";
-
-// RedSky base for PLP (search) queries
-const REDSKY_BASE = "https://redsky.target.com/redsky_aggregations/v1/web";
-
+// This version hits Target's PDP (product detail) endpoint directly
+// for a single TCIN at a single store. This avoids the flaky search.
+// It returns live availability / price for that product at your store.
 //
-// ====================================================================
-// 2. Build querystring the same way Target does for search suggestions
-//    (plp_search_v2). This is what powers "search results" pages.
-// ====================================================================
+// IMPORTANT:
+// - You must keep these values (COOKIE, USER_AGENT, etc.) fresh if Target
+//   changes them. If the call suddenly stops working with 403/502 again,
+//   open DevTools, grab a new Cookie header and update COOKIE below.
 //
-// q         => your keyword, e.g. "pokemon"
-// storeId   => local store ID (e.g. 2314)
-// webKey    => ?key=... from the request
-// visitorId => &visitor_id=... from the request
-//
-function buildSearchPath({ q, storeId, webKey, visitorId }) {
+// - Do NOT commit these secrets publicly in a real repo. Treat COOKIE like an API key.
+
+import { request } from "undici"; // Render complained earlier "Cannot find 'undici'"
+// Make sure "undici" is in package.json dependencies and redeploy.
+//  npm install undici
+//  git add package.json package-lock.json
+//  git commit ... && git push
+
+// ─────────────────────────────────────────
+// STATIC CONFIG (this is all stuff we got from you / DevTools)
+// ─────────────────────────────────────────
+
+// Store you care about. Right now you gave me 2314.
+const STORE_ID = process.env.TARGET_STORE_ID || "2314";
+
+// Your visitor_id from DevTools. Keep this in sync with DevTools network headers.
+const VISITOR_ID = process.env.TARGET_VISITOR_ID || "01989633EB690201997B4F22E8604F90";
+
+// Your key param from DevTools. This is in the URL query (?key=...)
+const WEB_KEY = process.env.TARGET_WEB_KEY || "9f36aeafbe60771e321a7cc95a78140772ab3e96";
+
+// Your User-Agent (real Chrome UA from your machine)
+const USER_AGENT = process.env.TARGET_UA || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
+
+// Your Referer — we spoof product page to look like normal browsing.
+// (We’ll dynamically insert the current TCIN at the very end of this referer)
+const REFERER_BASE =
+  "https://www.target.com/p/pok-233-mon-trading-card-game-scarlet-38-violet-prismatic-evolutions-booster-bundle/-/A-";
+
+// FULL Cookie header you screenshotted from DevTools (all one line).
+// NOTE: do not add line breaks, keep it exactly as one long string.
+const COOKIE = process.env.TARGET_COOKIE || (
+  "sapphire=1; visitorId=01989633EB690201997B4F22E8604F90; TealeafAkaSid=xe4YCxKzH4iAnRGBRSc11tptJxc1mgUp; UserLocation=99336|46.230|-119.240|WA|US; _pxvid=60561093-763d-11f0-be94-60c91b080304; crl8.fpuid=55cdaada-8a4a-4be7-ad94-c465f2659ce6; 3C77P39N=ASZUQ9YCAQAA367DDAA6cAIrPMB_7JbVGr_gMWDjG36JKw8j1OAr7BmGAHGAWAP1T-ucr0wSHAEAB83AAA07I6aFl2a6f19X77he2b60b4Ba0e90a5; brwsr=723ad9892-8227-11f0-bdbe-cd4daa1d5997; _gcl_gs=2.1.1k517599561341uS139466166; ci.reft=gt_advoc_consent_b83379fe7ac450f7; _gcl_au=1.1.1435774098.1754866770.923913432.17559960116.17599601166; fiatsCookie=DSI_2314|DSN_Richland|DSZ_99352; BVBRANDID=aC7b9beb-b2a4-45e6-b7d-5bd4385a62e4; _gcl_aw=GCL.1760654196.CjwKAjgwr4bHhEkeiwAy4u7dUnqVGKTAZMWR9n-MIS7_d1x0uvxNs1NwburLWZTNlUVcqbK0fVXaxxCQQkOAvD_BwE; _gcl_dc=GCL.1760654196.CjwKAjgwr4bHhEkeiwAy4u7dUnqVGKTAZMWR9n-MIS7_d1x0uvxNs1NwburLWZTNlUVcqbK0fVXaxxCQQkOAvD_BwE; ci_ppximp=imprad; ci_cpng=cPTID3; ci_clkid=702cca72Nadhd1fl108f179890c3496a889; ci_inm=1945656; pxcts=0c0b1623-afc6-11f0-af42-0ca452c7145b; mid=8183471813; usprivacy=1NN-; stateprivacycontrols=N; hasappr=true; loyaltyid=tlty.4a1dca57996e45e49b30f82f97740493; profileCreatedDate=2018-08-27T22:02:50.055Z; sapphire_audiences=%7B%22base_membership%22%3A%22card_membership%22%3Afalse%2C%22paid_membership%22%3Afalse%7D; sddStore=DSI_830|DSN_undefined|DSZ_99336; accesstoken=eyJraWQiOiJWYiXCmIywiWJXnploiUlmNYTiFQ.eyJzdWIlOiI4M1gzNDcxODEzInwiaXJ2IiXVWzhjowkNzYxNTE3MET2LCJpYXQiOjE3NjE0NzM2MtsIYspm0aSI6RlHVRcSwMhclJz0TA0mWxZhNlgzOjMiYzhYmZNmEyYjUzZWIzMTU0NS1iW1czti5jwZoizWFZMsIlnNdlNC1diGcll1LckJWaOjOiI3bOhZjYzNjkNzSNnMiDNZTZlOTY2zMQj2NYzXuUwWNjMzhZjliZmVmNlhXe0ZcdNzJmlwiZwlkMjloiczjpcmcwIVZGt9MjAxiNbNBnWBcFpbC5jb20iL2jXNi0i2IlOjY29lIjuxdwycGwUjaCIjbjQyGklOiI9ZjMlc0JmWmosLlmiR2M5IjE0MjM2DcwNzg1IlwiYzk5IjoiTC9.sOBR0vUTelY0xuZopPMy0W0IxhvcKGBGX3iRd-4ggdrygWDuGMiwdS8mN0HcxSNkMpl0_ccBKXlJOqBlKjfaYghfofckHgKVPMRwP9T833GsvJq5a3B6oQQnRnMkFJBI5J1lUJ40xzoj06m7s.h1oyx10.QLXH0BV9PMVHGmqCJGIY4Zkf7GrSNhf_ZgW8Dbxvn4Bn39rNS8WUzzzIsVh_DZblDkXO1_x6W84JcMpiP1VZqVcGqe2I3I5XNslyEw/t2ztt1d6szIubgHhNL6E16AsTRWVN9_9LgnJpl0n0YDRNcldvi-OLgUBRerklnKvbRk6A4NNvw9B57Gsg; refreshToken=IGT.dbz790308e368462a6bfa6623b258e61541-1; idToken=eyJhbGciOiJSUzI1NiIsImtpZCI6Y2I4OWlI4MGztNOxEZnlzWki2NqzDXEZllwiaXJ2IiXVWzhjxXWoykNzYxNTE3MET2LCJpYXQiOjE3NjE0NzM2MtsImFyc2licGxlIiwic0lsWDIcLZJdXOCI9YzNjIwIivP2l0ZW5VY3I0WbST3I2WtlMtIytJqon=eyJhciG0Ijn0U2sIlflnoYc8y77Di7eDIDjFIoG3reJhVIOlswe0ScldH7JlxZswic3OjQIl0XQSsInNluIuojilMvNXcJNIcjOFQ..wAjcLlCWcm8iOinsiZm40IiJTdGvwGluvimZ5Il0ijJxr3RlcGhIbIlsmVFtuji2c0pmKioqQCcoqKilsNBl0JpOnKLOWQ.MniS0TFiQ5IxDQulIyczZIOvRlqoumkHtUwETUzD96gOr4=oCD1T_... (truncated for brevity)"
+);
+
+// helper to build the exact URL for a given TCIN
+function buildPdpUrl(tcin) {
+  // We’re copying the query params you sent:
+  // key=...&tcin=...&is_bot=false&store_id=2314&pricing_store_id=2314
+  // &has_pricing_store_id=true&has_financing_options=true
+  // &include_obsolete=true&visitor_id=...&skip_personalized=true
+  // &skip_variation_hierarchy=true&channel=WEB&page=%2Fp%2FA-${tcin}
+
+  const base = "https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1";
   const params = new URLSearchParams({
-    // how many listings to return per page
-    count: "24",
-
-    // filter options used by Target web search
-    default_purchasability_filter: "true",
-    include_sponsored: "false",
-
-    // the actual user-entered search term
-    keyword: q,
-
-    // standard paging shape
-    page: "1",
-
-    // "desktop" is how their site identifies full Chrome
-    platform: "desktop",
-
-    // your store / same store for delivery
-    pricing_store_id: storeId,
-    scheduled_delivery_store_id: storeId,
-
-    // absolutely critical for Target to trust this request
-    visitor_id: visitorId,
-
-    // it always sets channel=WEB for browser flows
+    key: WEB_KEY,
+    tcin,
+    is_bot: "false",
+    store_id: STORE_ID,
+    pricing_store_id: STORE_ID,
+    has_pricing_store_id: "true",
+    has_financing_options: "true",
+    include_obsolete: "true",
+    visitor_id: VISITOR_ID,
+    skip_personalized: "true",
+    skip_variation_hierarchy: "true",
     channel: "WEB",
-
-    // internal RedSky web key (unlocks access)
-    key: webKey,
+    page: `/p%2FA-${tcin}` // matches your capture: page=%2Fp%2FA-93954446
   });
 
-  // final path is /plp_search_v2?...params...
-  return `/plp_search_v2?${params.toString()}`;
+  return `${base}?${params.toString()}`;
 }
 
-// ======================================
-// 3. Browser-like headers for RedSky API
-// ======================================
-//
-// These headers replicate Chrome talking to Target.com.
-// Origin + Referer especially matter.
-//
-function buildHeaders() {
+// Build headers to look like a real browser request.
+// Key things here are Cookie, User-Agent, Referer, Accept.
+function buildHeaders(tcin) {
   return {
-    accept: "application/json",
+    "accept": "application/json",
     "accept-language": "en-US,en;q=0.9",
-    "cache-control": "no-cache",
-    pragma: "no-cache",
-
-    // True browser UA you sent me
-    "user-agent": FIXED_USER_AGENT,
-
-    // Pretend this request came from a normal tab on target.com
-    origin: `https://${ORIGIN_HOST}`,
-    referer: FIXED_REFERER,
-
-    // These sec- headers help mimic Chrome network behavior
-    "sec-fetch-dest": "empty",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-site": "same-site",
-    "sec-ch-ua-platform": '"Windows"',
+    "user-agent": USER_AGENT,
+    "referer": `${REFERER_BASE}${tcin}`,
+    "cookie": COOKIE,
+    "sec-fetch-site": "same-origin",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-dest": "document",
+    "sec-fetch-user": "?1",
+    // (We could also send 'upgrade-insecure-requests': '1' if needed.)
   };
 }
 
-// ==================================================
-// 4. Call RedSky, normalize response -> nice JSON API
-// ==================================================
-//
-// Returns either:
-//   { ok: true, query, count, products: [ ... ] }
-// or
-//   { ok: false, status, error, snippet }
-//
-// Each product contains { tcin, title, price, available_to_promise_quantity }
-// which you can poll + alert on.
-//
-export async function searchTarget({
-  q,
-  storeId = DEFAULT_STORE_ID,
-  webKey = FIXED_WEB_KEY,
-  visitorId = FIXED_VISITOR_ID,
-}) {
-  // ---- Build query path Target expects
-  const pathWithQuery = buildSearchPath({
-    q,
-    storeId,
-    webKey,
-    visitorId,
-  });
+/**
+ * Fetch product details / availability for a single TCIN.
+ *
+ * Returns shape:
+ * {
+ *   ok: true,
+ *   tcin: "93954446",
+ *   title: "...",
+ *   price: "...",
+ *   pickup: { available: true/false, qty: number|null },
+ *   ship: { available: true/false, qty: number|null },
+ *   raw: {...} // the full RedSky json if you need to debug
+ * }
+ *
+ * or
+ *
+ * { ok:false, status:xxx, error:"...", snippet:"..." }
+ */
+export async function fetchItemStatus(tcin) {
+  const url = buildPdpUrl(tcin);
+  const headers = buildHeaders(tcin);
 
-  // ---- Full URL to hit
-  const url = `${REDSKY_BASE}${pathWithQuery}`;
-
-  // ---- Browser-style headers
-  const headers = buildHeaders();
-
-  // ---- Make the request using undici (Node 16+ HTTP client)
   const res = await request(url, {
     method: "GET",
     headers,
   });
 
-  // If RedSky said "nope", surface debug info so we can iterate
   if (res.statusCode !== 200) {
-    const text = await res.body.text();
-    const snippet = text.slice(0, 500);
+    // Read a short snippet of the body to help debug
+    let snippet = "";
+    try {
+      const text = await res.body.text();
+      snippet = text.slice(0, 500);
+    } catch (e) {
+      /* ignore */
+    }
+
     return {
       ok: false,
       status: res.statusCode,
@@ -153,40 +134,41 @@ export async function searchTarget({
     };
   }
 
-  // Parse body if 200 OK
-  const json = await res.body.json();
+  // Parse JSON
+  const data = await res.body.json();
 
-  // RedSky nests results under data.children[x].item
-  const children = json?.data?.children ?? [];
-  const rawItems = children
-    .map((child) => child.item)
-    .filter(Boolean);
+  // The shape here is nested, but common pattern:
+  // data.data.children[x].item.product_description.title
+  // data.data.children[x].item.fulfillment.*
+  // We'll try to extract the most important bits.
+  //
+  // NOTE: This structure sometimes changes, so we do a guarded parse.
 
-  // Extract the bits you care about
-  const products = rawItems.map((it) => ({
-    // Target's internal product ID
-    tcin: it?.tcin,
+  const child = data?.data?.children?.[0]?.item || {};
+  const fulfillment = child?.fulfillment ?? {};
+  const pickup = fulfillment?.pickupOptions?.[0];
+  const shipping = fulfillment?.shippingOptions?.[0];
 
-    // Product display title
-    title: it?.product_description?.title,
+  const title = child?.product_description?.title || "(no title?)";
 
-    // Price (current_retail is numeric, formatted_current_price is string)
-    price:
-      it?.price?.current_retail ??
-      it?.price?.formatted_current_price ??
-      null,
-
-    // Approx inventory: available_to_promise_quantity appears in shipping/pickup
-    available_to_promise_quantity:
-      it?.fulfillment?.shipping_options?.[0]?.available_to_promise_quantity ??
-      it?.fulfillment?.pickup_options?.[0]?.available_to_promise_quantity ??
-      null,
-  }));
+  // price - Target likes nested price info under current_retail / formatted_current_price
+  const priceInfo = child?.price?.current_retail ?? child?.price?.formatted_current_price ?? null;
 
   return {
     ok: true,
-    query: q,
-    count: products.length,
-    products,
+    tcin,
+    title,
+    price: priceInfo,
+    pickup: {
+      available: pickup?.available_to_promise_quantity > 0 || pickup?.order_pickup_available === true,
+      qty: pickup?.available_to_promise_quantity ?? null,
+      raw: pickup,
+    },
+    ship: {
+      available: shipping?.available_to_promise_quantity > 0 || shipping?.ship_to_guest === true,
+      qty: shipping?.available_to_promise_quantity ?? null,
+      raw: shipping,
+    },
+    raw: data, // full response for debugging / future parsing
   };
 }
