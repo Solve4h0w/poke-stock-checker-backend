@@ -1,123 +1,128 @@
 // backend/src/push.js
 //
 // Handles:
-// - tracking subscribers per item
-// - sending Expo push notifications
-// - polling logic helpers (but NOT the watcher loop itself anymore;
-//   Render will call watcher.js separately)
+//   - storing which devices want alerts for which Target items
+//   - sending Expo push notifications
+//
+// IMPORTANT: this version EXPORTS sendExpoPush()
+// so watcher.js can import it on Render without crashing.
 
-import { request } from "undici";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { request } from "undici";
 
-//
-// --- setup local file for subscriptions memory
-//
+// --------------------------------------------------
+// little helper so we can write/read a local json file
+// --------------------------------------------------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const SUBS_FILE = path.join(__dirname, "subscriptions.json");
+// we'll keep simple subscription data here on disk
+const SUB_PATH = path.join(__dirname, "subscriptions.json");
+
+// ensure file exists
+function ensureSubFile() {
+  if (!fs.existsSync(SUB_PATH)) {
+    fs.writeFileSync(
+      SUB_PATH,
+      JSON.stringify(
+        {
+          // shape:
+          // devices: {
+          //   "<expoPushToken>": {
+          //      items: ["93954446", "12345678", ...]
+          //   }
+          // }
+          devices: {}
+        },
+        null,
+        2
+      ),
+      "utf-8"
+    );
+  }
+}
 
 function loadSubs() {
-  try {
-    return JSON.parse(fs.readFileSync(SUBS_FILE, "utf8"));
-  } catch {
-    return {};
+  ensureSubFile();
+  const raw = fs.readFileSync(SUB_PATH, "utf-8");
+  return JSON.parse(raw);
+}
+
+function saveSubs(json) {
+  fs.writeFileSync(SUB_PATH, JSON.stringify(json, null, 2), "utf-8");
+}
+
+// --------------------------------------------------
+// registerDevice(expoPushToken, tcin)
+//   - store that this device wants alerts for this TCIN
+// --------------------------------------------------
+export function registerDevice(expoPushToken, tcin) {
+  const data = loadSubs();
+  if (!data.devices[expoPushToken]) {
+    data.devices[expoPushToken] = { items: [] };
   }
-}
-
-function saveSubs(obj) {
-  fs.writeFileSync(SUBS_FILE, JSON.stringify(obj, null, 2));
-}
-
-// remembers last in-stock state per item (name -> bool)
-let prevMap = new Map();
-
-function toBoolInStock(status) {
-  if (typeof status === "boolean") return status;
-  const s = String(status ?? "").toLowerCase();
-  return s.includes("in stock") || s === "true" || s === "yes" || s === "available";
-}
-
-//
-// --- send push to Expo
-//
-export async function sendExpoPush({ to, title, body, data }) {
-  const res = await request("https://exp.host/--/api/v2/push/send", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ to, title, body, data }),
-  });
-
-  const json = await res.body.json();
-  if (!res.ok) {
-    console.error("[push] Expo push error:", res.status, json);
-  } else {
-    console.log("[push] Expo push ok:", json?.data || json);
+  if (!data.devices[expoPushToken].items.includes(tcin)) {
+    data.devices[expoPushToken].items.push(tcin);
   }
-}
-
-//
-// --- subscribe / unsubscribe
-//
-export function subscribe(token, item) {
-  if (!token || !item) throw new Error("token and item required");
-  const subs = loadSubs();
-  subs[item] = Array.from(new Set([...(subs[item] || []), token]));
-  saveSubs(subs);
-  return { ok: true, item, subscribers: subs[item].length };
-}
-
-export function unsubscribe(token, item) {
-  if (!token || !item) throw new Error("token and item required");
-  const subs = loadSubs();
-  subs[item] = (subs[item] || []).filter((t) => t !== token);
-  if (!subs[item].length) delete subs[item];
-  saveSubs(subs);
-  return { ok: true, item, subscribers: subs[item]?.length || 0 };
-}
-
-//
-// --- notifyTest helper
-//
-export async function notifyTest(token, title = "Test Stock Alert", body = "This is a test.") {
-  await sendExpoPush({
-    to: token,
-    title,
-    body,
-    data: { type: "test" },
-  });
+  saveSubs(data);
   return { ok: true };
 }
 
-//
-// --- pollOnce + startWatcher used to live here.
-//     BUT watcher.js now imports pollOnce/startWatcher.
-//     We still export them so watcher.js can call them.
-//
-
-// We'll import fetchAvailability lazily inside pollOnce to avoid circular import.
-async function pollOnceInternal({ apiUrl }) {
-  // this function body will be replaced by watcher.js using fetchAvailability(),
-  // so here we just leave a placeholder to make sure push.js exports names
-  throw new Error(
-    "pollOnceInternal called directly. watcher.js should implement polling using fetchAvailability()."
-  );
+// --------------------------------------------------
+// getWatchList()
+//   -> returns [{ expoPushToken, tcin }, ...]
+//   this is what watcher.js will iterate over
+// --------------------------------------------------
+export function getWatchList() {
+  const data = loadSubs();
+  const out = [];
+  for (const [expoPushToken, rec] of Object.entries(data.devices)) {
+    for (const tcin of rec.items) {
+      out.push({ expoPushToken, tcin });
+    }
+  }
+  return out;
 }
 
-// we export stubs ONLY so watcher.js can import the names without crashing
-export async function pollOnce() {
-  return pollOnceInternal({ apiUrl: "" });
-}
+// --------------------------------------------------
+// sendExpoPush(token, title, body)
+//   - actually call Expo's push API
+// --------------------------------------------------
+export async function sendExpoPush(expoPushToken, title, body) {
+  // Expo push REST endpoint
+  const EXPO_URL = "https://exp.host/--/api/v2/push/send";
 
-export function startWatcher() {
-  console.log("[watcher] startWatcher() stubbed on Render free tier.");
-  // on free tier, Render may sleep so we don't auto-setInterval here.
-  return null;
-}
+  const payload = [
+    {
+      to: expoPushToken,
+      sound: "default",
+      title,
+      body
+    }
+  ];
 
-// Also export prevMap so watcher.js can update state between polls
-export { prevMap, toBoolInStock, loadSubs };
+  // use undici.request to POST
+  const res = await request(EXPO_URL, {
+    method: "POST",
+    headers: {
+      "accept": "application/json",
+      "accept-encoding": "gzip, deflate",
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const text = await res.body.text();
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    json = { raw: text };
+  }
+
+  // not throwing, just logging. watcher.js can keep going either way
+  console.log("[sendExpoPush] status", res.statusCode, "resp", json);
+  return { status: res.statusCode, resp: json };
+}
