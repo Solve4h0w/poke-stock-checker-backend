@@ -1,22 +1,27 @@
 // backend/src/server.js
-import 'dotenv/config';
-import express from 'express';
-import cors from 'cors';
-import targetRoutes from './targetRoutes.js';
+import "dotenv/config";
+import express from "express";
+import cors from "cors";
+
+import targetRoutes from "./targetRoutes.js";
+import { startWatcher } from "./watcher.js";
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Simple health checks
-app.get('/health', (req, res) => res.json({ ok: true }));
-app.get('/api/health', (req, res) => res.json({ ok: true }));
+// simple health checks
+app.get("/health", (req, res) => res.json({ ok: true }));
+app.get("/api/health", (req, res) => res.json({ ok: true }));
 
-// Mount Target routes
-app.use('/api/target', targetRoutes);
+// mount Target API routes
+app.use("/api/target", targetRoutes);
 
-// Start the server
+// start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Backend listening on ${PORT}`);
+
+  // kick off inventory watcher loop
+  startWatcher();
 });
