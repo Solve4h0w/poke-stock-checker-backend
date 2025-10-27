@@ -1,34 +1,13 @@
-// backend/src/fetchAvailability.js
-//
-// Fetch live per-store inventory for a single Target item.
-//
-// IMPORTANT SECURITY NOTE
-// - You are embedding cookie + visitor info in headers upstream (in targetRoutes).
-// - Long term, move secrets to env vars, not in Git.
-// - Short term, this module just accepts headers via options and does not hardcode them here.
-//
-// This file is responsible for:
-//   1. Building the RedSky URL for that store+item
-//   2. Calling RedSky with undici
-//   3. Decompressing gzip if needed
-//   4. Parsing out just the stuff you care about for alerts
+// backend/src/data/fetchAvailability.js
 
 import { request } from "undici";
-import zlib from "zlib";
 
 /**
- * Build the RedSky URL (product_fulfillment_and_variation_hierarchy_v1)
- * for exactly one tcin at one store.
+ * Build the full RedSky URL for `product_fulfillment_and_variation_hierarchy_v1`
+ * for a specific store + tcin.
  *
- * We keep these params consistent with what you captured in DevTools for Richland.
- *
- * @param {object} opts
- * @param {string} opts.tcin       e.g. "93954446"
- * @param {string} opts.storeId    e.g. "2314"
- * @param {string} opts.lat        e.g. "46.230"
- * @param {string} opts.lng        e.g. "-119.240"
- * @param {string} opts.zip        e.g. "99336"
- * @param {string} opts.visitorId  e.g. "01989633EB690201997B4F22E8604F90"
+ * All the changing bits (tcin, storeId, lat, lng, zip, visitorId) come from args.
+ * Everything else stays the same as we captured from DevTools.
  */
 function buildUrl({
   tcin,
@@ -38,23 +17,24 @@ function buildUrl({
   zip,
   visitorId,
 }) {
+  // This is the RedSky endpoint Target uses on PDP for availability.
+  // We recreate the querystring structure we saw in your capture.
   //
-  // Params taken from your captured network call. We keep most
-  // static except the store + tcin + visitorId + geo bits.
+  // NOTE: The "key" param (9f36aeafbe60771e321a7cc957a... etc) is required.
+  // We keep it constant; it's fine to reuse.
   //
-  // NOTE: scheduled_delivery_store_id and state=WA were in your capture.
-  // We leave them in because Target expects a consistent shape.
+  // The store / lat / lng / zip / visitorId are dynamic now.
   //
-  const KEY = "9f36aeafbe60771e321a7cc95a78140772ab3e96";
+  const KEY = "9f36aeafbe60771e321a7cc957a78140772ab396";
 
   const qs = new URLSearchParams({
     key: KEY,
     required_store_id: storeId,
     latitude: lat,
     longitude: lng,
-    scheduled_delivery_store_id: "830",
-    state: "WA",
-    zip,
+    scheduled_delivery_store_id: "830", // keep same as captured
+    state: "WA",                        // captured from your session
+    zip: zip,
     store_id: storeId,
     paid_membership: "false",
     base_membership: "true",
@@ -63,66 +43,57 @@ function buildUrl({
     tcin,
     visitor_id: visitorId,
     channel: "WEB",
-    page: `/p%2FA-${tcin}`,
+    // page param matches PDP browser route. We just mimic that shape.
+    page: `/p/2FA-${tcin}`,
   });
 
   return `https://redsky.target.com/redsky_aggregations/v1/web/product_fulfillment_and_variation_hierarchy_v1?${qs.toString()}`;
 }
 
 /**
- * Build headers that mimic your browser.
+ * Build the request headers we saw in DevTools.
+ * We pass:
+ *  - the giant Cookie blob
+ *  - the Referer that matches the PDP URL
+ *  - your user agent + sec-ch-ua hints
  *
- * We let the caller (targetRoutes) provide the giant Cookie string, so
- * we don't hardcode secrets here.
- *
- * @param {string} tcin
- * @param {string} cookie
+ * We paramaterize `tcin` so Referer updates per item,
+ * and `cookie` so we keep your live browser cookie in one place.
  */
-function buildHeaders(tcin, cookie) {
+function buildHeaders({ tcin, cookie }) {
   return {
-    // normal request headers we can send:
-    "accept": "application/json",
+    // normal request headers we *can* send via fetch/undici
+    accept: "application/json",
     "accept-encoding": "gzip, deflate, br, zstd",
     "accept-language": "en-US,en;q=0.9",
 
-    // your captured cookie (HUGE). passed in from router.
-    "cookie": cookie,
+    // IMPORTANT: Your full browser cookie blob
+    cookie,
 
-    "dnt": "1",
-    "origin": "https://www.target.com",
-    "priority": "u=1, i",
+    dnt: "1",
+    origin: "https://www.target.com",
+    priority: "u=1, i",
 
-    // Referer shaped like real PDP
-    "referer": `https://www.target.com/p/pok-233-mon-trading-card-game-scarlet-38-violet-prismatic-evolutions-booster-bundle/-/A-${tcin}`,
+    // Match Referer to the PDP URL for this item
+    referer: `https://www.target.com/p/pok-233-mon-trading-card-game-scarlet-38-violet-prismatic-evolutions-booster-bundle/-/A-${tcin}`,
 
-    // UA from your browser capture
-    "user-agent":
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36',
-
-    // misc fetch-y headers from capture
-    "sec-ch-ua": '"Google Chrome";v="141", "Not?A_Brand";v="8", "Chromium";v="141"',
+    // Browser-ish client hints you captured
+    "sec-ch-ua": `"Google Chrome";v="141", "NotA;Brand";v="8", "Chromium";v="141"`,
     "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
+    "sec-ch-ua-platform": "\"Windows\"",
     "sec-fetch-dest": "empty",
     "sec-fetch-mode": "cors",
     "sec-fetch-site": "same-site",
+
+    // Your real UA from DevTools
+    "user-agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
   };
 }
 
 /**
- * Safely gunzip a Buffer (sync is fine for these tiny payloads).
- * If it's not valid gzip, we'll just throw.
- */
-function tryGunzip(buffer) {
-  try {
-    return zlib.gunzipSync(buffer);
-  } catch (err) {
-    return null;
-  }
-}
-
-/**
- * Fetch availability for ONE item at ONE store.
+ * Call Target RedSky stock/fulfillment endpoint for ONE item @ ONE store.
+ * We parse the most important bits into something stable.
  *
  * @param {object} opts
  * @param {string} opts.tcin
@@ -131,7 +102,22 @@ function tryGunzip(buffer) {
  * @param {string} opts.lng
  * @param {string} opts.zip
  * @param {string} opts.visitorId
- * @param {string} opts.cookie   (full Cookie header captured from DevTools)
+ * @param {string} opts.cookie   (entire Cookie header you captured)
+ *
+ * @return {object} shaped like:
+ * {
+ *   ok: true/false,
+ *   status: number,
+ *   tcin: string,
+ *   storeId: string,
+ *   qty: number,
+ *   isAvailable: boolean,
+ *   inStoreStatus: string,
+ *   storeName: string,
+ *   updated: string,
+ *   raw: {...},   // the full RedSky JSON
+ *   debug: {...}  // misc debug (e.g. contentEncoding, decodedOK)
+ * }
  */
 export async function fetchAvailability({
   tcin,
@@ -142,6 +128,7 @@ export async function fetchAvailability({
   visitorId,
   cookie,
 }) {
+  // build URL
   const url = buildUrl({
     tcin,
     storeId,
@@ -151,167 +138,146 @@ export async function fetchAvailability({
     visitorId,
   });
 
-  const headers = buildHeaders(tcin, cookie);
+  // build headers
+  const headers = buildHeaders({ tcin, cookie });
 
-  // Call RedSky
+  // make the HTTP request using undici
   const res = await request(url, {
     method: "GET",
     headers,
   });
 
-  const { statusCode } = res;
+  const status = res.statusCode;
 
-  // We read the raw body as Buffer
-  const rawBuf = await res.body.arrayBuffer();
-  const nodeBuf = Buffer.from(rawBuf);
+  // Read body as text first so we can debug non-200 / invalid JSON scenarios.
+  const text = await res.body.text();
 
-  // Did Target say it's gzip?
-  const contentEncoding =
-    res.headers["content-encoding"] ||
-    res.headers["Content-Encoding"] ||
-    "";
-
-  let text;
-  if (
-    typeof contentEncoding === "string" &&
-    contentEncoding.toLowerCase().includes("gzip")
-  ) {
-    // Try gunzip
-    const unzipped = tryGunzip(nodeBuf);
-    if (!unzipped) {
-      // gzip but we couldn't decode it
-      return {
-        ok: false,
-        status: statusCode,
-        error: "Could not gunzip Target response",
-        snippet: nodeBuf.toString("base64").slice(0, 500),
-        debug: {
-          contentEncoding,
-          decodedOK: false,
-        },
-      };
-    }
-    text = unzipped.toString("utf8");
-  } else {
-    // Not marked gzip, treat buffer as utf8 text.
-    text = nodeBuf.toString("utf8");
-  }
-
-  // If NOT 200, just bubble up some debug so we can see what's going on.
-  if (statusCode !== 200) {
+  if (status !== 200) {
+    // when Target says "Not Found", they send JSON like:
+    // { "errors": [{ "message":"No product found with tcin 12345" }], "data": {}}
     return {
       ok: false,
-      status: statusCode,
+      status,
       error: "Non-200 from Target",
       snippet: text.slice(0, 500),
       debug: {
-        contentEncoding,
+        contentEncoding: res.headers["content-encoding"] || "",
         decodedOK: true,
       },
     };
   }
 
-  // Parse JSON
+  // parse JSON
   let json;
   try {
     json = JSON.parse(text);
   } catch (err) {
-    // still return debug info
     return {
       ok: false,
-      status: statusCode,
+      status,
       error: "Bad JSON from Target",
       snippet: text.slice(0, 500),
       debug: {
-        contentEncoding,
-        decodedOK: true,
+        contentEncoding: res.headers["content-encoding"] || "",
+        decodedOK: false,
       },
     };
   }
 
-  // ---- Pull important fields out of RedSky's deep shape ----
+  // Now we try to extract the useful fields.
+  // RedSky nesting tends to look like:
   //
-  // We'll walk to:
-  // json.data.product.fulfillment.store_options[0]
+  // {
+  //   data: {
+  //     product: {
+  //       __typename: 'Product',
+  //       notify_me_enabled: false,
+  //       pay_per_order_charges: {...},
+  //       fulfillment: {
+  //         product_id: '93954446',
+  //         is_out_of_stock_in_all_store_locations: false,
+  //         ...
+  //       },
+  //       store_options: [
+  //         {
+  //           location_id: '2314',
+  //           store: { location_name: 'Richland', mailing_address:{...} },
+  //           pickup: {...},
+  //           ship_to_store: {...},
+  //           in_store_only: {...},
+  //           availability_status: 'OUT_OF_STOCK',
+  //           location_available_to_promise_quantity: 0
+  //         }
+  //       ],
+  //       shipping_options: {...},
+  //       ...
+  //     }
+  //   }
+  // }
   //
-  // That usually has:
-  //   store_options[0].store.location_name
-  //   store_options[0].store.mailing_address
-  //   store_options[0].in_store_only.availability_status
-  //   store_options[0].order_pickup.availability_status
-  //   store_options[0].available_to_promise_quantity
-  //
-  // If anything is missing we'll fallback.
+  // We’ll defensively walk this to pull out:
+  // qty, storeName, inStoreStatus, updated timestamp.
 
-  const fulfillment =
-    json?.data?.product?.fulfillment || {};
+  const product = json?.data?.product || {};
+  const storeOptions = Array.isArray(product.store_options)
+    ? product.store_options
+    : [];
 
-  const storeOption0 =
-    Array.isArray(fulfillment.store_options) &&
-    fulfillment.store_options.length > 0
-      ? fulfillment.store_options[0]
-      : null;
+  // find matching storeId in store_options
+  let matchStore = storeOptions.find(
+    (opt) => String(opt.location_id) === String(storeId)
+  );
+  if (!matchStore && storeOptions.length > 0) {
+    // fallback to first
+    matchStore = storeOptions[0];
+  }
 
-  const resolvedStoreName =
-    storeOption0?.store?.location_name || "Unknown store";
+  const storeName = matchStore?.store?.location_name || "Unknown store";
 
-  const addressObj = storeOption0?.store?.mailing_address || {};
-  const inStoreOnlyStatus =
-    storeOption0?.in_store_only?.availability_status || "UNKNOWN";
-  const pickupStatus =
-    storeOption0?.order_pickup?.availability_status || "UNKNOWN";
-  const shipToStoreStatus =
-    storeOption0?.ship_to_store?.availability_status || "UNKNOWN";
+  // quantity promise at that location
+  const qty =
+    matchStore?.location_available_to_promise_quantity ??
+    matchStore?.available_to_promise_quantity ??
+    0;
 
-  // quantity Target thinks it can promise at that location
-  const atpQty =
-    typeof storeOption0?.available_to_promise_quantity === "number"
-      ? storeOption0.available_to_promise_quantity
-      : 0;
+  // in-store pickup style status
+  const inStoreStatus =
+    matchStore?.availability_status ||
+    matchStore?.pickup?.availability_status ||
+    matchStore?.in_store_only?.availability_status ||
+    "UNKNOWN";
 
-  // a single "is there any stock?" view we can alert on
+  // RedSky sticks timestamps in top-level store options or shipping/pickup nodes
+  // so we’ll grab whichever we see first:
+  const updated =
+    matchStore?.updated ||
+    matchStore?.pickup?.updated ||
+    matchStore?.ship_to_store?.updated ||
+    new Date().toISOString();
+
+  // Determine isAvailable with a simple rule:
+  // available if qty > 0 OR status does not scream OUT_OF_STOCK / UNAVAILABLE
   const isAvailable =
-    (inStoreOnlyStatus !== "OUT_OF_STOCK" &&
-      inStoreOnlyStatus !== "UNAVAILABLE") ||
-    atpQty > 0;
+    qty > 0 ||
+    !/OUT_OF_STOCK|UNAVAILABLE|NOT_SOLD_IN_STORE/i.test(inStoreStatus || "");
 
-  // Build final shape
-  const out = {
+  // Shape the final object the watcher + route both consume:
+  return {
     ok: true,
-    status: statusCode,
-
-    // basic identity
+    status,
     tcin,
     storeId,
-    storeName: resolvedStoreName,
-    zip,
+    qty,
+    isAvailable,
+    inStoreStatus,
+    storeName,
+    updated,
 
-    // high level availability decision
-    isAvailable,          // true if not marked out of stock OR qty > 0
-    qty: atpQty,          // numeric available_to_promise_quantity
+    raw: json, // keep the whole thing for inspection in browser
 
-    // channel-specific statuses
-    inStoreStatus: inStoreOnlyStatus,      // e.g. "OUT_OF_STOCK"
-    pickupStatus,                          // e.g. "UNAVAILABLE"
-    shipToStoreStatus,                     // e.g. "UNAVAILABLE"
-
-    // for debugging / display
-    updated: new Date().toISOString(),
-    address: {
-      line1: addressObj.address_line1 || null,
-      city: addressObj.city || null,
-      state: addressObj.state || null,
-      postal_code: addressObj.postal_code || null,
-    },
-
-    // keep the full Target JSON and decode/debug context,
-    // so you can inspect from the browser.
-    raw: json,
     debug: {
-      contentEncoding,
+      contentEncoding: res.headers["content-encoding"] || "",
       decodedOK: true,
     },
   };
-
-  return out;
 }
